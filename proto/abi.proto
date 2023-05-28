@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package abi;
+
+message MessageRequest {
+    oneof inner {
+        Connect connect = 1;
+        Ping ping = 2;
+        Text text = 3;
+        Textack textack = 4;
+
+        Disconnect disconnect = 99;
+    }
+}
+
+message MessageResponse {
+    oneof inner {
+        Connack connack = 1;
+        Pong pong = 2;
+        Text text = 3;
+        Textack textack = 4;
+        
+        Disconnect disconnect = 99;
+    }
+}
+
+message Connect {
+    string identifier = 1;
+    uint32 keep_alive = 2;
+}
+
+message Connack {
+    int32 code = 1;
+}
+
+message Disconnect {}
+
+message Ping {}
+message Pong {}
+
+message Text {
+    uint64 message_id = 1;
+    uint32 sender_id = 2;
+    uint32 receiver_id = 3;
+    uint32 message_type = 4;
+    string content = 5;
+}
+
+message Textack {
+    uint64 message_id = 1;
+    uint64 store_id = 2;
+    uint32 status = 3;
+}
+
