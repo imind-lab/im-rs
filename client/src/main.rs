@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
     let mut client = Framed::new(stream, LengthDelimitedCodec::new());
 
     // 生成一个 HSET 命令
-    let msg = MessageRequest::new_connect("9527".to_string(), 18);
+    let msg = MessageRequest::new_connect("9531".to_string(), 18);
 
     let mut buffer = BytesMut::new();
 
@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
     // thread::sleep(Duration::from_secs(2));
 
     // 生成一个 HSET 命令
-    let msg = MessageRequest::new_text(20000, 9527, 9528, 0, "Hello koofox");
+    let msg = MessageRequest::new_text(20000, 9531, 9527, 1, "Hello AI2AI");
 
     let mut buffer = BytesMut::new();
 

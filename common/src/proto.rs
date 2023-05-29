@@ -89,4 +89,13 @@ impl MessageResponse {
             inner: Some(message_response::Inner::Disconnect(Disconnect {}))
         }
     }
+
+}
+
+impl MessageResponse {
+    pub fn with_text(text: Text) -> Self {
+        Self { 
+            inner: Some(message_response::Inner::Text(text))
+        }
+    }
 }

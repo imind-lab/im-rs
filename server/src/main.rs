@@ -1,14 +1,14 @@
-use std::{collections::HashMap, sync::Arc, net::Shutdown};
+use std::{collections::HashMap, sync::Arc};
 
 use bytes::BytesMut;
 use prost::Message;
-use std::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, mpsc};
+use std::net::{TcpListener};
+use tokio::sync::{Mutex, mpsc, broadcast};
 use anyhow::Result;
 use tracing::info;
 use futures::prelude::*;
 
-use common::proto::{MessageRequest, message_request};
+use common::proto::{MessageRequest, message_request, MessageResponse};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::service::{Service, ServiceInner};
@@ -24,83 +24,91 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(addr).unwrap();
     info!("Start listening on {}", addr);
 
-    let clients = Arc::new(Mutex::new(HashMap::<String, TcpStream>::new()));
-
-
-    let (sender, receiver) = mpsc::unbounded_channel::<Box<dyn Message>>();
+    let clients = Arc::new(Mutex::new(HashMap::<String, mpsc::UnboundedSender<MessageResponse>>::new()));
 
     let service: Service = ServiceInner::new().into();
 
+    let (tx, _) = broadcast::channel::<MessageResponse>(2);
+
     loop {
-        let (raw_stream, addr) = listener.accept().unwrap();
+        let (stream, addr) = listener.accept().unwrap();
         info!("Client: {:?} connected", addr);
-
-        let addr = addr.to_string();
-
-        let mut data = clients.lock().await;
-        data.insert(addr.clone(), raw_stream.try_clone().unwrap());
 
         let service = service.clone();
 
         let clients = Arc::clone(&clients);
 
+        let tx = tx.clone();
+        let mut rx = tx.subscribe();
+
+
         tokio::spawn(async move {
-            let tokio_stream = tokio::net::TcpStream::from_std(raw_stream.try_clone().unwrap()).unwrap();
-            let mut stream = Framed::new(tokio_stream, LengthDelimitedCodec::new());
-            while let Some(Ok(mut buf)) = stream.next().await {
+            let stream = tokio::net::TcpStream::from_std(stream.try_clone().unwrap()).unwrap();
+            let mut stream = Framed::new(stream, LengthDelimitedCodec::new());
 
-                let msg = MessageRequest::decode(&buf[..]).unwrap();
-                println!("recevie: {:?}", msg);
+            let (sender, mut receiver) = mpsc::unbounded_channel::<MessageResponse>();
 
-                buf.clear();
-
-                match msg.clone().inner {
-                    Some(message_request::Inner::Connect(req)) => {
-                        let mut data = clients.lock().await;
-
-                        let target_stream = match data.remove(&addr) {
-                            Some(stream) => stream,
-                            None => raw_stream.try_clone().unwrap()
-                        };
-
-                        if let Some(old_stream) = data.insert(req.identifier, target_stream) {
-                            let _ = old_stream.shutdown(Shutdown::Both);
-                        }
-
-                        if let Some(res) = service.execute(msg) {
-                            println!("res1:{:?}", res);
-                            let mut buf = BytesMut::new();
-                            res.encode(&mut buf).unwrap();
-                            stream.send(buf.freeze()).await.unwrap();
-                        }
+            loop {
+                tokio::select! {
+                    Some(msg) = receiver.recv() => {
+                        let mut buf = BytesMut::new();
+                        msg.encode(&mut buf).unwrap();
+                        stream.send(buf.freeze()).await.unwrap();
                     },
-                    Some(message_request::Inner::Text(req)) => {
-                        println!("test:{:?}", req);
+                    Ok(msg) = rx.recv() => {
+                        println!("broastcast recv");
+                        let mut buf = BytesMut::new();
+                        msg.encode(&mut buf).unwrap();
+                        stream.send(buf.freeze()).await.unwrap();
+                    },
+                    Some(Ok(mut buf)) = stream.next() => {
 
-                        let mut data = clients.lock().await;
+                        let msg = MessageRequest::decode(&buf[..]).unwrap();
+                        println!("recevie: {:?}", msg);
+        
+                        buf.clear();
+        
+                        match msg.clone().inner {
+                            Some(message_request::Inner::Connect(req)) => {
+        
+                                let mut data = clients.lock().await;
+                                if let Some(old_sender) = data.insert(req.identifier, sender.clone()) {
+                                    old_sender.closed().await;
+                                }
+        
+                                if let Some(res) = service.execute(msg) {
+                                    println!("res1:{:?}", res);
+                                    let mut buf = BytesMut::new();
+                                    res.encode(&mut buf).unwrap();
+                                    stream.send(buf.freeze()).await.unwrap();
+                                }
+                            },
+                            Some(message_request::Inner::Text(req)) => {
+                                println!("test:{:?}", req);
+        
+                                let mut data = clients.lock().await;
+        
+                                if let Some(sender) = data.get_mut(&req.receiver_id.to_string()) {
+                                    sender.send(MessageResponse::with_text(req.clone())).unwrap();
+                                }
+        
+                                if req.message_type == 1 {
+                                    tx.send(MessageResponse::with_text(req.clone())).unwrap();
+                                }
 
-                        if let Some(stream) = data.remove(&req.receiver_id.to_string()) {
-                            println!("test1:{:?}", &req.receiver_id.to_string());
-
-                            let tokio_stream = tokio::net::TcpStream::from_std(stream).unwrap();
-                            let mut stream = Framed::new(tokio_stream, LengthDelimitedCodec::new());
-                            
-                            let res = MessageRequest::new_text(req.message_id, req.sender_id, req.receiver_id, req.message_type, &req.content);
-                            let mut buf = BytesMut::new();
-                            res.encode(&mut buf).unwrap();
-                            stream.send(buf.freeze()).await.unwrap();
+                                if let Some(res) = service.execute(msg) {
+                                    println!("res2:{:?}", res);
+                                    let mut buf = BytesMut::new();
+                                    res.encode(&mut buf).unwrap();
+                                    stream.send(buf.freeze()).await.unwrap();
+                                }
+                            }
+                            _ => (),
                         }
-
-                        if let Some(res) = service.execute(msg) {
-                            println!("res2:{:?}", res);
-                            let mut buf = BytesMut::new();
-                            res.encode(&mut buf).unwrap();
-                            stream.send(buf.freeze()).await.unwrap();
-                        }
-                    }
-                    _ => (),
+                        
+                    },
+                    else => break,
                 }
-                
             }
         });
     }
